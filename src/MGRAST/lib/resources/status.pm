@@ -33,14 +33,14 @@ sub info {
     my ($self) = @_;
     my $content = {
         'name' => $self->name,
-        'url' => $self->cgi->url."/".$self->name,
+        'url' => $self->url."/".$self->name,
         'description' => "Status of asynchronous API calls",
         'type' => 'object',
-        'documentation' => $self->cgi->url.'/api.html#'.$self->name,
+        'documentation' => $self->url.'/api.html#'.$self->name,
         'requests' => [
             {
                 'name'        => "info",
-                'request'     => $self->cgi->url."/".$self->name,
+                'request'     => $self->url."/".$self->name,
                 'description' => "Returns description of parameters and attributes.",
                 'method'      => "GET" ,
                 'type'        => "synchronous" ,  
@@ -51,9 +51,9 @@ sub info {
             },
             {
                 'name'        => "instance",
-                'request'     => $self->cgi->url."/".$self->name."/{UUID}",
+                'request'     => $self->url."/".$self->name."/{UUID}",
                 'description' => "Returns a single data object.",
-                'example'     => [ 'curl -X GET -H "auth: auth_key" "'.$self->cgi->url."/".$self->name.'/cfb3d9e1-c9ba-4260-95bf-e410c57b1e49"',
+                'example'     => [ 'curl -X GET -H "auth: auth_key" "'.$self->url."/".$self->name.'/cfb3d9e1-c9ba-4260-95bf-e410c57b1e49"',
                               		"data for asynchronous call with ID cfb3d9e1-c9ba-4260-95bf-e410c57b1e49" ],
                 'method'      => "GET" ,
                 'type'        => "synchronous" ,  
@@ -86,9 +86,16 @@ sub instance {
     my $obj = {
         id => $uuid,
         status => "processing",
-        url => $self->cgi->url."/".$self->name."/".$uuid,
-        started => $node->{created_on}
+        url => $self->url."/".$self->name."/".$uuid,
+        started => $node->{created_on},
+        updated => ($node->{last_modified} eq "0001-01-01T00:00:00Z") ? $node->{created_on} : $node->{last_modified}
     };
+    if (exists $node->{attributes}{progress}) {
+        $obj->{progress} = $node->{attributes}{progress};
+    }
+    if (exists $node->{attributes}{parameters}) {
+        $obj->{parameters} = $node->{attributes}{parameters};
+    }
     
     if ($node->{file}{name} && $node->{file}{size}) {
         $obj->{status} = "done";
@@ -106,12 +113,14 @@ sub instance {
                 $data = $self->json->decode($content);
             };
             if ($@ || (! $data)) {
-                $self->return_data( {"ERROR" => "invalid data format: ".$@}, 404 );
+                $data = $content;
             }
-            my $error = exists($data->{ERROR}) ? $data->{ERROR} : (exists($data->{error}) ? $data->{error} : undef);
-            if ($error) {
-                my $status = exists($data->{STATUS}) ? $data->{STATUS} : (exists($data->{status}) ? $data->{status} : 500);
-                $self->return_data( {"ERROR" => $error},  $status);
+            if (ref($data) eq "HASH") {
+                my $error = exists($data->{ERROR}) ? $data->{ERROR} : (exists($data->{error}) ? $data->{error} : undef);
+                if ($error) {
+                    my $status = exists($data->{STATUS}) ? $data->{STATUS} : (exists($data->{status}) ? $data->{status} : 500);
+                    $self->return_data( {"ERROR" => $error},  $status);
+                }
             }
             $obj->{data} = $data;
         }

@@ -19,17 +19,14 @@ sub new {
   $self->{m5nr_version} = 1;
   $self->{services} = {
       'FTP' => 'ftp://'.$Conf::ftp_download,
-      'website' => $Conf::cgi_url,
+      'website' => $Conf::web_site,
       'SHOCK' => $Conf::shock_url,
       'SHOCKDB' => 'mongo',
       'AWE' => $Conf::awe_url,
       'AWEDB' => 'mongo',
       'M5NR' => $Conf::m5nr_solr,
       'solr' => $Conf::job_solr,
-      'postgres' => 'db',
-      'postgresWRITE' => 'db',
-      'postgresREAD' => 'db',
-      'mySQL' => 'db',
+      'mySQL' => 'mysql',
       'cassandra' => $Conf::cassandra_m5nr
   };
   $self->{attributes} = { "service" => [ 'string', "cv", [
@@ -41,10 +38,8 @@ sub new {
 							   ['AWEDB', 'worker engine mongodb'],
 							   ['M5NR', 'non-redundant sequence database'],
 							   ['solr', 'search engine'],
-							   ['postgres', 'analysis default database'],
-							   ['postgresWRITE', 'analysis write database'],
-							   ['postgresREAD', 'analysis read database'],
-							   ['mySQL', 'job database']
+							   ['mySQL', 'job database'],
+							   ['cassandra', 'analysis database'],
 							 ] ],
 			  "status"  => [ 'boolean', 'service is up or not' ],
 			  "url"     => [ 'url', 'resource location of this resource']
@@ -57,12 +52,12 @@ sub new {
 sub info {
   my ($self) = @_;
   my $content = { 'name' => $self->name,
-		  'url' => $self->cgi->url."/".$self->name,
+		  'url' => $self->url."/".$self->name,
 		  'description' => "Status of services",
 		  'type' => 'object',
-		  'documentation' => $self->cgi->url.'/api.html#'.$self->name,
+		  'documentation' => $self->url.'/api.html#'.$self->name,
 		  'requests' => [ { 'name'        => "info",
-				    'request'     => $self->cgi->url."/".$self->name,
+				    'request'     => $self->url."/".$self->name,
 				    'description' => "Returns description of parameters and attributes.",
 				    'method'      => "GET" ,
 				    'type'        => "synchronous" ,  
@@ -72,9 +67,9 @@ sub info {
 						       'body'     => {} }
 				  },
 				  { 'name'        => "instance",
-				    'request'     => $self->cgi->url."/".$self->name."/{SERVICE}",
+				    'request'     => $self->url."/".$self->name."/{SERVICE}",
 				    'description' => "Returns the status of a service.",
-				    'example'     => [ 'curl -X GET -H "auth: auth_key" "'.$self->cgi->url."/".$self->name.'/M5NR"',
+				    'example'     => [ 'curl -X GET -H "auth: auth_key" "'.$self->url."/".$self->name.'/M5NR"',
 						       "status of the M5NR service" ],
 				    'method'      => "GET" ,
 				    'type'        => "synchronous" ,  
@@ -100,28 +95,14 @@ sub instance {
   
   my $status = 0;
   
-  if ($self->{services}->{$id} eq 'db') {
-    if ($id =~ /^postgres/) {
-      my $host = ($id eq 'postgresWRITE') ? $Conf::mgrast_write_dbhost : $Conf::mgrast_dbhost;
-      my $dbh = DBI->connect(
-			     "DBI:Pg:database=".$Conf::mgrast_db.";host=".$host.";".$Conf::pgsslcert_path,
-			     $Conf::mgrast_dbuser,
-			     $Conf::mgrast_dbpass
-			    );
-      if ($dbh) {
-	      $status = 1;
-      }
-    } else {
-      my $jobcache_db = $Conf::mgrast_jobcache_db;
-      my $jobcache_host = $Conf::mgrast_jobcache_host;
-      my $jobcache_user = $Conf::mgrast_jobcache_user;
-      my $jobcache_password = $Conf::mgrast_jobcache_password;      
-      my $dbh = DBI->connect("DBI:mysql:database=".$jobcache_db.";host=".$jobcache_host.";",
-			     $jobcache_user,
-			     $jobcache_password);
-      if ($dbh) {
-	      $status = 1;
-      }
+  if ($self->{services}->{$id} eq 'mysql') {
+    my $jobcache_db = $Conf::mgrast_jobcache_db;
+    my $jobcache_host = $Conf::mgrast_jobcache_host;
+    my $jobcache_user = $Conf::mgrast_jobcache_user;
+    my $jobcache_password = $Conf::mgrast_jobcache_password;      
+    my $dbh = DBI->connect("DBI:mysql:database=".$jobcache_db.";host=".$jobcache_host.";", $jobcache_user, $jobcache_password);
+    if ($dbh) {
+      $status = 1;
     }
   } elsif ($self->{services}->{$id} eq 'mongo') {
       my ($host, $port);
@@ -137,12 +118,12 @@ sub instance {
   } elsif ($id eq 'cassandra') {
       # need to test a query as handle can still be made but cluster in bad state
       # test md5 is 74428bf03d3c75c944ea0b2eb632701f / E. coli alcohol dehydrogenase / m5nr version 1
-      my $test_md5_id = 10795366;
+      my $test_md5    = '74428bf03d3c75c944ea0b2eb632701f';
       my $test_source = "RefSeq";
       my $test_data = [];
       eval {
-          my $chdl = $self->cassandra_m5nr_handle("m5nr_v".$self->{m5nr_version}, $self->{services}->{$id});
-          $test_data = $chdl->get_records_by_id([$test_md5_id], $test_source);
+          my $chdl = $self->cassandra_handle("m5nr", $self->{m5nr_version});
+          $test_data = $chdl->get_records_by_md5([$test_md5], $test_source);
           $chdl->close();
       };
       if ((! $@) && (@$test_data > 0)) {
@@ -161,7 +142,7 @@ sub instance {
   my $obj = {};
   $obj->{service} = $id;
   $obj->{status} = $status;
-  $obj->{url} = $self->cgi->url."/".$self->name."/".$id;
+  $obj->{url} = $self->url."/".$self->name."/".$id;
   
   # check the status service
   $self->return_data($obj, undef, 1);

@@ -1,6 +1,8 @@
 # git ignore file 
 
 # ignore all generated files
+*.swo
+*.swp
 site
 site/**/*
 conf/Conf.pm
@@ -11,6 +13,9 @@ bin/*.r
 # ignore files with # and ~
 *\#*
 *\~*
+
+# python files
+*.pyc
 
 # os x files
 *.DS_Store

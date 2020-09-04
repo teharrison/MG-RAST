@@ -35,18 +35,18 @@ sub data {
       print STDERR Dumper $value;
       return 0;
     }
-    my $jstat = $self->_master->MetaDataEntry->get_objects( { collection => $self,
-							      tag        => $tag,
-							      value      => $value
-							    });
+    my $jstat = $self->_master->MetaDataEntry->get_objects({
+        collection => $self,
+        tag        => $tag
+    });
     if (ref $jstat and scalar @$jstat) {
-      $jstat->[0]->value($value) ;
-    }
-    else {
-      $jstat = $self->_master->MetaDataEntry->create( { collection => $self,
-							tag        => $tag,
-							value      => $value
-						      });
+      $jstat->[0]->value($value);
+    } else {
+      $jstat = $self->_master->MetaDataEntry->create({
+          collection => $self,
+          tag        => $tag,
+          value      => $value
+      });
     }
     return 1;
   }
@@ -122,6 +122,30 @@ sub jobs {
   return $jobs;
 }
 
+=item * B<metagenome_ids> ()
+
+Returns array of metagenome_ids that have this collection
+
+=cut
+
+sub metagenome_ids {
+  my ($self) = @_;
+
+  my $mgids = [];
+  my $dbh = $self->_master->db_handle;
+
+  if ($self->type eq 'sample') {
+    $mgids = $dbh->selectcol_arrayref("SELECT metagenome_id FROM Job where sample=".$self->_id." and viewable=1");
+  }
+  elsif ($self->type eq 'library') {
+    $mgids = $dbh->selectcol_arrayref("SELECT metagenome_id FROM Job where library=".$self->_id." and viewable=1");
+  }
+  elsif (($self->type eq 'ep') && $self->parent && ref($self->parent)) {
+    $mgids = $dbh->selectcol_arrayref("SELECT metagenome_id FROM Job where sample=".$self->parent->_id." and viewable=1");
+  }
+  return $mgids;
+}
+
 =item * B<children> ()
 
 Returns array of children collections,
@@ -172,6 +196,15 @@ sub delete_all {
   $self->delete_children;
   $self->delete_entries;
   $self->delete_project;
+  $self->delete_jobentry;
+}
+
+sub delete_jobentry {
+  my ($self) = @_;
+  foreach my $job ( @{ $self->_master->Job->get_objects({sample => $self}) } ) {
+    $job->sample(undef);
+    $job->library(undef);
+  }
 }
 
 sub delete_project {

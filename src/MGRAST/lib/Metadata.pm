@@ -8,6 +8,7 @@ use URI::Escape;
 use Storable qw(dclone);
 use Data::Dumper;
 use File::Temp qw/ tempfile tempdir /;
+use File::Slurp;
 use JSON;
 
 use DBMaster;
@@ -66,6 +67,19 @@ sub template {
   return $self->{data};
 }
 
+sub misc_param {
+    my ($self, $val) = @_;
+    return {
+        aliases    => ['misc_param'],
+        definition => 'any other measurement performed or parameter collected, that is not listed here',
+        required   => 0,
+        type       => 'text',
+        mixs       => 0,
+        unit       => '',
+        value      => $val
+    };
+}
+
 sub get_cv_all {
     my ($self, $tag) = @_;
     my $data = {};
@@ -86,6 +100,60 @@ sub get_cv_select {
   return ($tmp && @$tmp) ? $tmp : [];
 }
 
+sub put_cv_select {
+  my ($self, $tag, $data) = @_;
+  my $dbh = $self->{_handle}->db_handle;
+  my $sth = $dbh->prepare("INSERT INTO MetaDataCV (type, tag, value) VALUES ('select', '$tag', ?)");
+  foreach my $row (@$data) {
+      $sth->execute($row);
+  }
+  $sth->finish;
+  $dbh->commit;
+}
+
+sub del_cv_select {
+  my ($self, $tag) = @_;
+  my $dbh = $self->{_handle}->db_handle;
+  $dbh->do("DELETE FROM MetaDataCV WHERE type='select' AND tag='$tag'");
+  $dbh->commit;
+}
+
+sub cv_ontology_info {
+    my ($self) = @_;
+    my $out = {};
+    my $dbh = $self->{_handle}->db_handle;
+    my $tmp = $dbh->selectall_arrayref("SELECT tag, value, value_id, value_version FROM MetaDataCV WHERE type='ontology_info'");
+    if ($tmp && @$tmp) {
+        map { $out->{$_->[0]} = [] } @$tmp;
+        foreach my $row (@$tmp) {
+            push @{$out->{$row->[0]}}, {
+                label => $row->[1],
+                id    => $row->[2],
+                url   => $row->[3]
+            };
+        }
+    }
+    return $out;
+}
+
+sub cv_ontology_types {
+    my ($self) = @_;
+    my $ont = {};
+    my $dbh = $self->{_handle}->db_handle;
+    my $tmp = $dbh->selectcol_arrayref("SELECT DISTINCT tag FROM MetaDataCV WHERE type='ontology'");
+    if ($tmp && @$tmp) {
+        map { $ont->{$_} = 1 } @$tmp;
+    }    
+    return $ont;
+}
+
+sub get_cv_ontology_id {
+    my ($self, $tag, $value) = @_;
+    my $dbh = $self->{_handle}->db_handle;
+    my $tmp = $dbh->selectcol_arrayref("SELECT DISTINCT value_id FROM MetaDataCV WHERE tag='$tag' AND type='ontology' AND value='$value'");
+    return ($tmp && @$tmp) ? $tmp->[0] : undef;
+}
+
 sub get_cv_ontology {
   my ($self, $tag, $version) = @_;
   if (! $version) {
@@ -96,11 +164,22 @@ sub get_cv_ontology {
   return ($tmp && @$tmp) ? $tmp : [];
 }
 
-sub cv_ontology_info {
-  my ($self, $tag) = @_;
-  my $dbh = $self->{_handle}->db_handle;
-  my $tmp = $dbh->selectrow_arrayref("SELECT DISTINCT value, value_id FROM MetaDataCV WHERE tag='$tag' AND type='ont_info'");
-  return ($tmp && @$tmp) ? $tmp : ['', ''];
+sub put_cv_ontology {
+    my ($self, $tag, $version, $data) = @_;
+    my $dbh = $self->{_handle}->db_handle;
+    my $sth = $dbh->prepare("INSERT INTO MetaDataCV (type, tag, value_version, value, value_id) VALUES ('ontology', '$tag', '$version', ?, ?)");
+    foreach my $row (@$data) {
+        $sth->execute($row->[0], $row->[1]);
+    }
+    $sth->finish;
+    $dbh->commit;
+}
+
+sub del_cv_ontology {
+    my ($self, $tag, $version) = @_;
+    my $dbh = $self->{_handle}->db_handle;
+    $dbh->do("DELETE FROM MetaDataCV WHERE type='ontology' AND tag='$tag' AND value_version='$version'");
+    $dbh->commit;
 }
 
 sub cv_ontology_versions {
@@ -138,6 +217,15 @@ sub cv_latest_version {
   }
 }
 
+sub set_cv_latest_version {
+    my ($self, $tag, $version) = @_;
+    my $dbh = $self->{_handle}->db_handle;
+    my $sth = $dbh->prepare("UPDATE MetaDataCV SET value=? WHERE type='latest_version' AND tag='$tag'");
+    $sth->execute($version);
+    $sth->finish;
+    $dbh->commit;
+}
+
 =pod
 
 =item * B<mixs> ()
@@ -157,11 +245,13 @@ sub mixs {
     foreach my $tag (keys %{$template->{$cat}}) {
       next if ($tag eq 'category_type');
       if ($template->{$cat}{$tag}{required} && $template->{$cat}{$tag}{mixs}) {
-	if ($ct eq 'library') {
-	  $mixs->{$ct}{$cat}{$tag} = 1;
-	} else {
-	  $mixs->{$ct}{$tag} = 1;
-	}
+	    if ($ct eq 'library') {
+	      $mixs->{$ct}{$cat}{$tag} = 1;
+        } elsif ($ct eq 'ep') {
+          $mixs->{$ct}{$cat}{$tag} = 1;
+	    } else  {
+	      $mixs->{$ct}{$tag} = 1;
+	    }
       }
     }
   }
@@ -274,8 +364,11 @@ where key is same type as input array
 =cut 
 
 sub get_jobs_metadata_fast {
-  my ($self, $job_ids, $is_mgid) = @_;
+  my ($self, $job_ids, $is_mgid, $strict_typing) = @_;
 
+  unless ($job_ids && (@$job_ids > 0)) {
+      return {};
+  }
   my $data  = {};
   my $projs = {};
   my $samps = {};
@@ -365,6 +458,14 @@ sub get_jobs_metadata_fast {
       }
     }
   }
+  if ($strict_typing) {
+      foreach my $j (keys %$data) {
+          $data->{$j}{project}{data}     = $self->strict_typing('project', $data->{$j}{project}{data});
+          $data->{$j}{sample}{data}      = $self->strict_typing('sample', $data->{$j}{sample}{data});
+          $data->{$j}{library}{data}     = $self->strict_typing($data->{$j}{library}{data}{investigation_type}, $data->{$j}{library}{data});
+          $data->{$j}{env_package}{data} = $self->strict_typing($data->{$j}{sample}{data}{env_package}, $data->{$j}{env_package}{data});
+      }
+  }
   return $data;
 }
 
@@ -379,7 +480,7 @@ where key is metageome_id if is_mgid=1, else job_id (default)
 =cut 
 
 sub get_jobs_metadata {
-  my ($self, $jobs, $is_mgid, $full_data) = @_;
+  my ($self, $jobs, $is_mgid, $full_data, $strict_typing) = @_;
 
   my $data = {};
   foreach my $job (@$jobs) {
@@ -387,15 +488,21 @@ sub get_jobs_metadata {
     if ($job->primary_project) {
       $data->{$key}{project} = {id => 'mgp'.$job->primary_project->id, name => $job->primary_project->name, public => $job->primary_project->public, data => $job->primary_project->data};
       map { $data->{$key}{project}{data}{$_} =~ s/^(gaz|country):\s?//i } grep {$data->{$key}{project}{data}{$_}} keys %{$data->{$key}{project}{data}};
+      if ($strict_typing) {
+          $data->{$key}{project}{data} = $self->strict_typing('project', $data->{$key}{project}{data});
+      }
       if ($full_data) {
-	$data->{$key}{project}{data} = $self->add_template_to_data('project', $data->{$key}{project}{data});
+	      $data->{$key}{project}{data} = $self->add_template_to_data('project', $data->{$key}{project}{data});
       }
     }
     if ($job->sample) {
       $data->{$key}{sample} = {id => 'mgs'.$job->sample->ID, name => $job->sample->name || $job->name, data => $job->sample->data};
       map { $data->{$key}{sample}{data}{$_} =~ s/^(gaz|country|envo):\s?//i } grep {$data->{$key}{sample}{data}{$_}} keys %{$data->{$key}{sample}{data}};
+      if ($strict_typing) {
+          $data->{$key}{sample}{data} = $self->strict_typing('sample', $data->{$key}{sample}{data});
+      }
       if ($full_data) {
-	$data->{$key}{sample}{data} = $self->add_template_to_data('sample', $data->{$key}{sample}{data});
+	      $data->{$key}{sample}{data} = $self->add_template_to_data('sample', $data->{$key}{sample}{data});
       }
     }
     if ($job->library) {
@@ -403,7 +510,7 @@ sub get_jobs_metadata {
       ## type: calculated takes precidence over inputed
       $data->{$key}{library}{type} = $job->sequence_type ? $job->sequence_type : $self->investigation_type_alias($job->library->lib_type);
       unless ($data->{$key}{library}{data}{seq_meth}) {
-	$data->{$key}{library}{data}{seq_meth} = $job->data('sequencing_method_guess')->{sequencing_method_guess} || '';
+	      $data->{$key}{library}{data}{seq_meth} = $job->data('sequencing_method_guess')->{sequencing_method_guess} || '';
       }
       # make sure these are same as job table
       $data->{$key}{library}{data}{metagenome_id}   = $job->{metagenome_id};
@@ -411,15 +518,21 @@ sub get_jobs_metadata {
       if ($job->{file}) { $data->{$key}{library}{data}{file_name} = $job->{file}; }
       if ($job->{file_checksum_raw}) { $data->{$key}{library}{data}{file_checksum} = $job->{file_checksum_raw}; }
       # add template if requested
+      if ($strict_typing) {
+          $data->{$key}{library}{data} = $self->strict_typing($job->library->lib_type, $data->{$key}{library}{data});
+      }
       if ($full_data) {
-	$data->{$key}{library}{data} = $self->add_template_to_data($job->library->lib_type, $data->{$key}{library}{data});
+	      $data->{$key}{library}{data} = $self->add_template_to_data($job->library->lib_type, $data->{$key}{library}{data});
       }
     }
     my $ep = $job->env_package;
     if ($ep) {
       $data->{$key}{env_package} = {id => 'mge'.$ep->ID, name => $ep->name || $job->name.": ".$ep->ep_type, type => $ep->ep_type, data => $ep->data};
+      if ($strict_typing) {
+          $data->{$key}{env_package}{data} = $self->strict_typing($ep->ep_type, $data->{$key}{env_package}{data});
+      }
       if ($full_data) {
-	$data->{$key}{env_package}{data} = $self->add_template_to_data($ep->ep_type, $data->{$key}{env_package}{data});
+	      $data->{$key}{env_package}{data} = $self->add_template_to_data($ep->ep_type, $data->{$key}{env_package}{data});
       }
     }
   }
@@ -436,9 +549,9 @@ category_type => { id => #, name => '', type => '', data => {tag => value} }
 =cut 
 
 sub get_job_metadata {
-  my ($self, $job, $full_data) = @_;
+  my ($self, $job, $full_data, $strict_typing) = @_;
 
-  my $data = $self->get_jobs_metadata([$job], 0, $full_data);
+  my $data = $self->get_jobs_metadata([$job], 0, $full_data, $strict_typing);
   return exists($data->{$job->job_id}) ? $data->{$job->job_id} : {};
 }
 
@@ -460,8 +573,8 @@ sub get_job_mixs {
 	    $mixs->{PI_lastname}  = $pdata->{PI_lastname};
     };
     my $lat_lon = $job->lat_lon;
-    $mixs->{latitude}   = (@$lat_lon > 1) ? $lat_lon->[0] : "";
-    $mixs->{longitude}  = (@$lat_lon > 1) ? $lat_lon->[1] : "";
+    $mixs->{latitude}   = (@$lat_lon > 1) ? ($lat_lon->[0] * 1.0) : undef;
+    $mixs->{longitude}  = (@$lat_lon > 1) ? ($lat_lon->[1] * 1.0) : undef;
     $mixs->{country}    = $job->country || "";
     $mixs->{location}   = $job->location || "";
     $mixs->{biome}      = $job->biome || "";
@@ -488,26 +601,33 @@ sub is_job_compliant {
 
   my $mixs = $self->mixs();
   my $data = $self->get_job_metadata($job);
-  unless (exists $data->{library}{data}{investigation_type}) {
+  my $lib  = $data->{library}{data}{investigation_type} || undef;
+  my $ep   = $data->{sample}{data}{env_package} || undef;
+  
+  unless ($lib && $ep && exists($mixs->{library}{$lib})) {
     return 0;
   }
-  my $lib = $data->{library}{data}{investigation_type};
-  unless (exists $mixs->{library}{$lib}) {
-    return 0;
-  }
+  
   foreach my $cat (keys %$mixs) {
     if ($cat eq 'library') {
       foreach my $tag (keys %{$mixs->{library}{$lib}}) {
-	if (! exists($data->{$cat}{data}{$tag})) {
-	  return 0;
-	}
+	    if (! exists($data->{library}{data}{$tag})) {
+	      return 0;
+	    }
       }
-    }
-    else {
+    } elsif ($cat eq 'ep') {
+      if (exists $mixs->{ep}{$ep}) {
+        foreach my $tag (keys %{$mixs->{ep}{$ep}}) {
+          if (! exists($data->{env_package}{data}{$tag})) {
+            return 0;
+          }
+        }
+      }
+    } else {
       foreach my $tag (keys %{$mixs->{$cat}}) {
-	if (! exists($data->{$cat}{data}{$tag})) {
-	  return 0;
-	}
+	    if (! exists($data->{$cat}{data}{$tag})) {
+	      return 0;
+	    }
       }
     }
   }
@@ -527,27 +647,40 @@ sub verify_job_metadata {
 
   my $mixs = $self->mixs();
   my $data = $self->get_job_metadata($job);
+  my $lib  = $data->{library}{data}{investigation_type} || undef;
+  my $ep   = $data->{sample}{data}{env_package} || undef;
+  
   my $errors = [];
-  unless (exists $data->{library}{data}{investigation_type}) {
-    push(@$errors, "mandatory term 'investigation type' missing");
+  unless ($lib) {
+    push(@$errors, "mandatory term 'investigation_type' missing");
   }
-  my $lib = $data->{library}{data}{investigation_type};
-  unless (exists $mixs->{library}{$lib}) {
+  unless ($lib && exists($mixs->{library}{$lib})) {
     push(@$errors, "library missing");
   }
+  unless ($ep) {
+    push(@$errors, "mandatory term 'env_package' missing");
+  }
+  
   foreach my $cat (keys %$mixs) {
     if ($cat eq 'library') {
       foreach my $tag (keys %{$mixs->{library}{$lib}}) {
-	if (! exists($data->{$cat}{data}{$tag})) {
-	  push(@$errors, "mandatory term '$tag' from category '$cat' missing");
-	}
+        if (! exists($data->{library}{data}{$tag})) {
+          push(@$errors, "mandatory term '$tag' from category 'library $lib' missing");
+        }
       }
-    }
-    else {
+    } elsif ($cat eq 'ep') {
+      if (exists $mixs->{ep}{$ep}) {
+        foreach my $tag (keys %{$mixs->{ep}{$ep}}) {
+          if (! exists($data->{env_package}{data}{$tag})) {
+            push(@$errors, "mandatory term '$tag' from category 'env_package $ep' missing");
+          }
+        }
+      }
+    } else {
       foreach my $tag (keys %{$mixs->{$cat}}) {
-	if (! exists($data->{$cat}{data}{$tag})) {
-	  push(@$errors, "mandatory term '$tag' from category '$cat' missing");
-	}
+        if (! exists($data->{$cat}{data}{$tag})) {
+          push(@$errors, "mandatory term '$tag' from category '$cat' missing");
+        }
       }
     }
   }
@@ -712,64 +845,102 @@ env_package: { name:<samp_name-env_package_type: str>, type:<env_package_type: s
 sub export_metadata_for_project {
   my ($self, $project, $all_fields) = @_;
 
+  # get the base project data
   my $pdata = $project->data;
   $pdata->{project_name} = $project->name;
   $pdata->{mgrast_id}    = 'mgp'.$project->id;
   my $mdata = { name => $project->name,
 		id   => 'mgp'.$project->id,
-		data => $self->add_template_to_data('project', $pdata, $all_fields),
+		data => $self->add_template_to_data('project', $pdata),
 		sampleNum => 0,
 		samples   => [] };
 
-  foreach my $samp ( @{ $project->collections('sample') } ) {
-    my $e_obj = {};
-    my $epack = $samp->children('ep');
-    my $sdata = $samp->data;
-    my $sname = $samp->name || 'mgs'.$samp->ID;
+  # get the library / sample / ep data from the db
+  my $dbh  = $self->{_handle}->db_handle;
+  my $data = $dbh->selectall_arrayref("SELECT me.collection, mc.ID, mc.parent, me.value, me.tag, mc.type FROM ProjectCollection pc, MetaDataEntry me, MetaDataCollection mc WHERE pc.project=".$project->{_id}." AND mc._id=pc.collection AND mc._id=me.collection");
+    
+  # get metagenome-library info
+  my %mginfo = map { $_->[0], [ $_->[1], $_->[2] ] } @{ $dbh->selectall_arrayref("SELECT library, metagenome_id, name FROM Job WHERE primary_project=".$project->{_id}) };
 
-    if (@$epack && $epack->[0]->ep_type) {
-      my $edata = $epack->[0]->data;
-      $edata->{sample_name} = $sname;
-      $edata->{mgrast_id}   = 'mge'.$epack->[0]->ID;
-      $e_obj = { name => $epack->[0]->name || 'mge'.$epack->[0]->ID,
-		 id   => 'mge'.$epack->[0]->ID,
-		 type => $epack->[0]->ep_type,
-		 data => $self->add_template_to_data($epack->[0]->ep_type, $edata, $all_fields) };
-    }
-    $sdata->{sample_name} = $sname;
-    $sdata->{mgrast_id}   = 'mgs'.$samp->ID;
-    my $s_obj = { name   => $sname,
-		  id     => 'mgs'.$samp->ID,
-		  data   => $self->add_template_to_data('sample', $sdata, $all_fields),
-		  libNum => 0,
-		  libraries => []
-		};
-    if (exists $e_obj->{id}) {
-      $s_obj->{envPackage} = $e_obj;
-    }
-
-    foreach my $lib ( @{ $samp->children('library') } ) {
-      next unless ($lib->lib_type);
-      my $ldata = $lib->data;
-      $ldata->{sample_name} = $sname;
-      $ldata->{mgrast_id}   = 'mgl'.$lib->ID;
-      my $lib_jobs = $lib->jobs;
-      if (@$lib_jobs > 0) {
-	$ldata->{metagenome_id} = $lib_jobs->[0]->{metagenome_id};
-	$ldata->{metagenome_name} = $lib_jobs->[0]->{name} || '';
-	if ($lib_jobs->[0]->{file}) { $ldata->{file_name} = $lib_jobs->[0]->{file}; }
-	if ($lib_jobs->[0]->{file_checksum_raw}) { $ldata->{file_checksum} = $lib_jobs->[0]->{file_checksum_raw}; }
+  # iterate over the data and structure it
+  # collection 0 | parent 1 | value 2 | tag 3 | type 4 
+  my $samples = {};
+  my $eps = {};
+  my $libs = {};
+  my $errors = [];
+  foreach my $d (@$data) {
+    if ($d->[5] eq 'sample') {
+      if (! $samples->{$d->[0]}) {
+          $samples->{$d->[0]} = { "data" => {}, "id" => "mgs".$d->[1] };
       }
-      push @{ $s_obj->{libraries} }, { name => $lib->name || 'mgl'.$lib->ID,
-				       id   => 'mgl'.$lib->ID,
-				       type => $lib->lib_type,
-				       data => $self->add_template_to_data($lib->lib_type, $ldata, $all_fields)};
-      $s_obj->{libNum} += 1;
+      $samples->{$d->[0]}->{data}->{$d->[4]} = $d->[3];
+    } elsif ($d->[5] eq 'ep') {
+      if (! $eps->{$d->[0]}) {
+          $eps->{$d->[0]} = { "parent" => $d->[2], "data" => {}, "id" => "mge".$d->[1] };
+      }
+      $eps->{$d->[0]}->{data}->{$d->[4]} = $d->[3];
+
+    } elsif ($d->[5] eq 'library') {
+      if (! $libs->{$d->[0]}) {
+          $libs->{$d->[0]} = { "parent" => $d->[2], "data" => {}, "id" => "mgl".$d->[1] };
+      }
+      $libs->{$d->[0]}->{data}->{$d->[4]} = $d->[3];
+    }
+  }
+
+  # add the libraries to their samples
+  foreach my $k (keys(%$libs)) {
+    my $parent = $libs->{$k}->{parent};
+    if ($samples->{$parent}) {
+      if (! $samples->{$parent}->{libraries}) {
+	    $samples->{$libs->{$k}->{parent}}->{libraries} = [];
+      }
+      if (exists $mginfo{$k}) {
+          $libs->{$k}->{data}->{metagenome_id} = "mgm".$mginfo{$k}[0];
+          $libs->{$k}->{data}->{metagenome_name} = $mginfo{$k}[1];
+      }
+      $libs->{$k}->{type} = $libs->{$k}->{data}->{investigation_type};
+      $libs->{$k}->{name} = $libs->{$k}->{data}->{metagenome_name} || $libs->{$k}->{id};
+      push(@{$samples->{$parent}->{libraries}}, $libs->{$k});
+    }
+  }
+
+  # add the eps to their samples
+  foreach my $k (keys(%$eps)) {
+    my $parent = $eps->{$k}->{parent};
+    if ($samples->{$parent}) {
+      $eps->{$k}->{type} = $eps->{$k}->{data}->{env_package};
+      delete $eps->{$k}->{data}->{env_package};
+      $eps->{$k}->{name} = $samples->{$parent}->{id}.": ".$eps->{$k}->{type};
+      $samples->{$parent}->{"envPackage"} = $eps->{$k};
+    }
+  }
+
+  # add the samples to the project data structure
+  foreach my $k (keys(%$samples)) {
+    $samples->{$k}->{libNum} = $samples->{$k}->{libraries} ? scalar(@{$samples->{$k}->{libraries}}) : 0;
+    $samples->{$k}->{name} = $samples->{$k}->{data}->{sample_name} || $samples->{$k}->{id};
+
+    # iterate over the libraries and objectify them
+    if ($samples->{$k}->{libraries}) {
+      foreach my $lib (@{$samples->{$k}->{libraries}}) {
+          delete $lib->{parent};
+          $lib->{data} = $self->add_template_to_data($lib->{type}, $lib->{data});
+      }
     }
 
-    push @{ $mdata->{samples} }, $s_obj;
-    $mdata->{sampleNum} += 1;
+    # objectify the ep
+    delete $samples->{$k}->{envPackage}->{parent};
+    $samples->{$k}->{envPackage}->{data} = $self->add_template_to_data($samples->{$k}->{envPackage}->{type}, $samples->{$k}->{envPackage}->{data});
+
+    # objectify the sample
+    $samples->{$k}->{data} = $self->add_template_to_data('sample', $samples->{$k}->{data});
+    
+    push(@{$mdata->{samples}}, $samples->{$k});
   }
+
+  $mdata->{sampleNum} = scalar(@{$mdata->{samples}});
+
   return $mdata;
 }
 
@@ -777,43 +948,73 @@ sub export_metadata_for_project {
 ## output: { tag => {aliases=>[<str>], definition=><str>, required=><bool>, mixs=><bool>, type=><str>, unit=><str>, value=><str>} }
 ## all required tags will be added
 sub add_template_to_data {
-  my ($self, $cat, $data, $all) = @_;
+  my ($self, $cat, $data) = @_;
   my $t_data   = {};
   my $template = $self->template;
-  my @required = grep { ($_ ne 'category_type') && $template->{$cat}{$_}{required} } keys %{$template->{$cat}};
-  map { $data->{$_} = '' } grep { ! exists($data->{$_}) } @required;
-  if ($all) {
-    my @all_fields = grep { $_ ne 'category_type' } keys %{$template->{$cat}};
-    map { $data->{$_} = '' } grep { ! exists($data->{$_}) } @all_fields;
+  unless (exists $template->{$cat}) {
+      return {};
   }
-
-  my $misc = 0;
+  my %required = map { $_, 1 } grep { ($_ ne 'category_type') && $template->{$cat}{$_}{required} } keys %{$template->{$cat}};
+  # add missing required
+  map { $data->{$_} = '' } grep { ! exists($data->{$_}) } keys %required;
   while ( my ($tag, $val) = each %$data ) {
-    my $ttag = '';
     $val = clean_value($val);
-    if (! exists $template->{$cat}{$tag}) {
-      next unless (defined($val) && ($val =~ /\S/));
-      if ($tag =~ /^misc_param_/) {
-	$ttag = 'misc_param';
-      } else {
-	$misc += 1;
-	$val  = $tag.': '.$val;
-	$tag  = 'misc_param_'.$misc;
-	$ttag = 'misc_param';
-      }
+    # only skip empty values if not required
+    next unless (exists($required{$tag}) || (defined($val) && ($val =~ /\S/)));
+    if (! exists($template->{$cat}{$tag})) {
+        # this is user defined
+        $t_data->{$tag}{unit} = '';
+        $t_data->{$tag}{type} = 'text';
+        $t_data->{$tag}{mixs} = 0;
+        $t_data->{$tag}{aliases} = ['misc_param'];
+        $t_data->{$tag}{required} = 0;
+        $t_data->{$tag}{definition} = 'any other measurement performed or parameter collected, that is not listed here';
+        $t_data->{$tag}{value} = $val;
     } else {
-      $ttag = $tag;
+        $t_data->{$tag}{unit} = $template->{$cat}{$tag}{unit};
+        $t_data->{$tag}{type} = $template->{$cat}{$tag}{type};
+        $t_data->{$tag}{mixs} = $template->{$cat}{$tag}{mixs};
+        $t_data->{$tag}{aliases} = $template->{$cat}{$tag}{aliases};
+        $t_data->{$tag}{required} = $template->{$cat}{$tag}{required};
+        $t_data->{$tag}{definition} = $template->{$cat}{$tag}{definition};
+        $t_data->{$tag}{value} = $val;
     }
-    next unless ($all || $template->{$cat}{$ttag}{required} || (defined($val) && ($val =~ /\S/)));
-    $t_data->{$tag}{value} = $val;
-    $t_data->{$tag}{unit}  = $template->{$cat}{$ttag}{unit};
-    $t_data->{$tag}{type}  = $template->{$cat}{$ttag}{type};
-    $t_data->{$tag}{mixs}  = $template->{$cat}{$ttag}{mixs};
-    $t_data->{$tag}{aliases} = $template->{$cat}{$ttag}{aliases};
-    $t_data->{$tag}{required} = $template->{$cat}{$ttag}{required};
-    $t_data->{$tag}{definition} = $template->{$cat}{$ttag}{definition};
   }
   return $t_data;
+}
+
+## input:  { tag => value }
+## output: same as input but with values in correct type based on template
+##         if unable to type cast, remove value
+sub strict_typing {
+    my ($self, $cat, $data) = @_;
+    my $t_data   = {};
+    my $template = $self->template;
+    unless ($cat && exists($template->{$cat})) {
+        return {};
+    }
+    while ( my ($tag, $val) = each %$data ) {
+        $val = clean_value($val);
+        next unless (defined($val) && ($val =~ /\S/));
+        if (! exists($template->{$cat}{$tag})) {
+            # this is user defined
+            $t_data->{$tag} = $val;
+        } elsif (($template->{$cat}{$tag}{type} eq 'int') || ($template->{$cat}{$tag}{type} eq 'boolean')) {
+            # any integer
+            if ($val =~ /^[+-]?\d+$/) {
+                $t_data->{$tag} = int($val);
+            }
+        } elsif (($template->{$cat}{$tag}{type} eq 'float') || ($template->{$cat}{$tag}{type} eq 'coordinate')) {
+            # any float
+            if ($val =~ /^-?(?:\d+(?:\.\d*)?|\.\d+)$/) {
+                $t_data->{$tag} = $val * 1.0;
+            }
+        } else {
+            # text or whatever
+            $t_data->{$tag} = $val;
+        }
+    }
+    return $t_data;
 }
 
 sub clean_value {
@@ -824,6 +1025,21 @@ sub clean_value {
     $val =~ s/^-$//;
   }
   return $val;
+}
+
+# resolve an obfuscated mg-rast id
+# if it is an mg-rast id already, return it as is
+sub idresolve {
+  my ($self, $id) = @_;
+
+  unless ($id =~ /^mgm/ or $id =~ /^mgp/ or $id =~ /^\d+\.\d+$/) {
+    if(length($id) >=10){
+    $id = substr $id, 10;
+    $id = pack (qq{H*},qq{$id});
+   }
+  }
+
+  return $id;
 }
 
 =pod
@@ -1024,6 +1240,32 @@ sub update_curator {
   $self->{_handle}->Curator->init({ID => $curator})->set_attributes($attributes);
 }
 
+sub metadata_to_excel {
+  my ($self, $metadata) = @_;
+    
+  my $json = new JSON;
+  $json = $json->utf8();
+  my $text = $json->encode($metadata);
+  
+  my ($data_hdl, $data_name) = tempfile("metadata_XXXXXXX", DIR => $Conf::temp, SUFFIX => '.json');
+  close $data_hdl;
+  write_file($data_name, $text);
+  
+  my ($out_hdl, $out_name) = tempfile("metadata_XXXXXXX", DIR => $Conf::temp, SUFFIX => '.xlsx');
+  close $out_hdl;
+  
+  my $cmd = $Conf::export_metadata." -j $data_name -o $out_name 2>&1";
+  my $err = `$cmd`;
+  chomp $err;
+  unlink $data_name;
+  
+  if ($err) {
+      return ("", $err);
+  } else {
+      return ($out_name, "");
+  }
+}
+
 sub validate_metadata {
   my ($self, $filename, $skip_required, $map_by_id) = @_;
 
@@ -1063,49 +1305,125 @@ sub validate_metadata {
   return ($is_valid, $data, $log);
 }
 
-### this handels both new projects / collections and updating existing
+### this handles both new projects / collections and updating existing
 sub add_valid_metadata {
   my ($self, $user, $data, $jobs, $project, $map_by_id, $delete_old) = @_;
 
   unless ($user && ref($user)) {
     return (undef, [], ["invalid user object"]);
   }
-
+  
   my $err_msg = [];
   my $added   = [];
   my $mddb    = $self->{_handle};
   my $curator = $self->add_curator($user);
-  my $job_map = {};
+  my $job_map_id = {};
+  my $job_map_name = {};
   my $job_name_change = []; # [old, new]
-  if ($map_by_id) {
-    %$job_map = map {$_->metagenome_id, $_} grep {$user->has_right(undef, 'edit', 'metagenome', $_->metagenome_id) || $user->has_star_right('edit', 'metagenome')} @$jobs;
-  } else {
-    %$job_map = map {$_->name, $_} grep {$user->has_right(undef, 'edit', 'metagenome', $_->metagenome_id) || $user->has_star_right('edit', 'metagenome')} @$jobs;
+
+  # check permissions
+  my $original_count = scalar(@$jobs);
+  @$jobs = grep {$user->has_right(undef, 'edit', 'metagenome', $_->{metagenome_id}) || $user->has_star_right('edit', 'metagenome')} @$jobs;
+  
+  # check if there are duplicate jobs and create the job_name_map
+  my $duplicates = {};
+  foreach my $job (@$jobs) {
+
+    # there is another mg with the same name
+    if ($job_map_name->{$job->{name}}) {
+
+      # the previous one is newer than this, mark this one as the duplicate
+      if ($job_map_name->{$job->{name}}->{metagenome_id} > $job->{metagenome_id}) {
+	$duplicates->{$job->{metagenome_id}} = 1;
+      }
+      # this one is newer than the previous, mark the previous as duplicate and replace it in the name hash with this one
+      else {
+	$job_map_name->{$job->{name}} = $job;
+	$duplicates->{$job_map_name->{$job->{name}}->{metagenome_id}} = 1;
+      }
+    }
+
+    # this is not duplicate (yet), put it in the name hash
+    else {
+      $job_map_name->{$job->{name}} = $job;
+    }
   }
-  if (scalar(keys %$job_map) < scalar(@$jobs)) {
-    push @$err_msg, "user lacks permission to edit ".(scalar(@$jobs) - scalar(keys %$job_map))." metagenome(s)";
+
+  # if there were duplicates, create an error message entry
+  if (scalar(keys(%$duplicates))) {
+    push @$err_msg, "the following jobs were detected to be duplicates: ".join(keys(%$duplicates), ", ");
+  }
+
+  # create the job_map_id
+  foreach my $job (@$jobs) {
+    if (! $duplicates->{$job->{metagenome_id}}) {
+      $job_map_id->{$job->{metagenome_id}} = $job;
+    }
+  }
+
+  # check if there were jobs removed due to permissions
+  if (scalar(@$jobs) < $original_count) {
+    push @$err_msg, "user lacks permission to edit ".($original_count - scalar(@$jobs))." metagenome(s)";
   }
   
-  ### create project / add jobs and metadata
+  # check if this is a new project and create it
   my $new_proj = 0;
   my @proj_md  = map { [$_, $data->{data}{$_}{value}] } keys %{$data->{data}};
   unless ($project && ref($project)) {
     $project  = $mddb->Project->create_project($user, $data->{name}, \@proj_md, $curator, 0);
     $new_proj = 1;
   }
+
+  # check for project edit permissions
   unless ( $user->has_right(undef, 'edit', 'project', $project->id) || $user->has_star_right('edit', 'project') ) {
     push @$err_msg, "user lacks permission to edit project ".$project->id;
     return ($project->id, [], $err_msg);
   }
+
+  # update the project metadata, a new project will already have done this above
   unless ($new_proj) {
     foreach my $md (@proj_md) {
       $project->data($md->[0], $md->[1]);
     }
   }
+  
+  # get all existing project collections
+  my $query  = "SELECT c._id, c.ID, c.type, c.name, c.parent FROM ProjectCollection p, MetaDataCollection c WHERE p.project=".$project->{_id}." AND p.collection=c._id";
+  my $result = $mddb->db_handle->selectall_arrayref($query);
 
-  ## process samples
-  SAMP: foreach my $samp (@{$data->{samples}}) {
+  # check if there are duplicate samples / libraries / eps and create a namemap
+  $duplicates = { sample => {}, library => {}, ep => {} };
+  my $namemap = { sample => {}, library => {}, ep => {} };
+  foreach my $collection (@$result) {
+    if ($namemap->{$collection->[2]}->{$collection->[3]}) {
+
+      # this is the duplicate
+      if ($namemap->{$collection->[2]}->{$collection->[3]}->{_id} > $collection->[0]) {
+	$duplicates->{$collection->[2]}->{$collection->[0]} = 1;
+      }
+
+      # the previous entry is the duplicate
+      else {
+	$duplicates->{$collection->[2]}->{$namemap->{$collection->[2]}->{$collection->[3]}->{_id}} = 1;
+	$namemap->{$collection->[2]}->{$collection->[3]} = { "_id" => $collection->[0], "ID" => $collection->[1], "type" => $collection->[2], "name" => $collection->[3], "parent" => $collection->[4] };
+      }
+      
+    } else {
+      $namemap->{$collection->[2]}->{$collection->[3]} = { "_id" => $collection->[0], "ID" => $collection->[1], "type" => $collection->[2], "name" => $collection->[3], "parent" => $collection->[4] };
+    }
+  }
+  
+  # process samples
+  foreach my $samp (@{$data->{samples}}) {
+    
+    # check if the sample has a name
+    unless (defined $samp->{name}) {
+      push @$err_msg, "sample without name, skipped";
+      next;
+    }
+    
     my $samp_coll = undef;
+    
     # use existing sample if ID given
     if ($samp->{id}) {
       my $samp_ID = $samp->{id};
@@ -1123,57 +1441,99 @@ sub add_valid_metadata {
 	$samp_coll->name($samp->{name});
       }
     }
-    # else create new sample
+    # else try to get by name or create new sample
     else {
-      $samp_coll = $self->add_collection($project, 'sample', $curator, $samp->{name});
+      # check if this project already has a sample of this name
+      if (defined $namemap->{sample}->{$samp->{name}}) {
+	$samp_coll = $mddb->MetaDataCollection->get_objects({"_id" => $namemap->{sample}->{$samp->{name}}->{_id}})->[0];
+      } else {
+
+	# add the project reference to the sample
+	$samp_coll = $self->add_collection($project, 'sample', $curator, $samp->{name});
+      }
     }
-    # delete / replace sample metadata
+    
+    # delete old sample metadata
     my $samp_mde = $mddb->MetaDataEntry->get_objects({collection => $samp_coll});
     map { $_->delete() } @$samp_mde;
-    if (exists $samp->{data}{mgrast_id}) {
-      $samp->{data}{mgrast_id} = { value => 'mgs'.$samp_coll->ID };
-    }
+
+    # set the id
+    $samp->{data}{mgrast_id} = { value => 'mgs'.$samp_coll->ID };
+
+    # add updated metadata
     my @samp_md = map { [ $_, $samp->{data}{$_}{value} ] } keys %{$samp->{data}};
     $self->add_entries($samp_coll, \@samp_md);
     
-    ## process sample env_package
+    # process sample env_package
     my $ep_coll = undef;
-    # use existing env_package if ID given
-    if ($samp->{envPackage}{id}) {
-      my $ep_ID = $samp->{envPackage}{id};
-      $ep_ID    =~ s/mge(.+)/$1/;
-      $ep_coll  = $mddb->MetaDataCollection->init({ID => $ep_ID});
-      if (ref($ep_coll) && ($ep_coll->parent->{ID} == $samp_coll->ID)) {
-	# valid ep for this sample
-	$ep_coll->name($samp->{envPackage}{name});
-      }
-    }
-    # create new ep for this sample if not created above
-    unless (ref($ep_coll) && ($ep_coll->parent->{ID} == $samp_coll->ID)) {
-      $ep_coll = $self->add_collection($project, 'ep', $curator, $samp->{envPackage}{name}, $samp_coll);
-    }
-    # delete / replace ep metadata
-    my $ep_mde = $mddb->MetaDataEntry->get_objects({collection => $ep_coll});
-    map { $_->delete() } @$ep_mde;
-    if (exists $samp->{envPackage}{data}{mgrast_id}) {
-      $samp->{envPackage}{data}{mgrast_id} = { value => 'mge'.$ep_coll->ID };
-    }
-    my @ep_md = map { [ $_, $samp->{envPackage}{data}{$_}{value} ] } keys %{$samp->{envPackage}{data}};
-    push @ep_md, [ 'env_package', $samp->{envPackage}{type} ];
-    $self->add_entries($ep_coll, \@ep_md);
 
-    ## process libraries for sample
+    # check if we have a type set
+    if ($samp->{envPackage}{type}) {
+    
+      # use existing env_package if ID given
+      if ($samp->{envPackage}{id}) {
+	my $ep_ID = $samp->{envPackage}{id};
+	$ep_ID    =~ s/mge(.+)/$1/;
+	$ep_coll  = $mddb->MetaDataCollection->init({ID => $ep_ID});
+	if (ref($ep_coll) && ($ep_coll->parent->{ID} == $samp_coll->ID)) {
+	  
+	  # valid ep for this sample
+	  $ep_coll->name($samp->{envPackage}{name});
+	}
+      } elsif (defined $namemap->{ep}->{$samp->{envPackage}{name}}) {
+	$ep_coll = $mddb->MetaDataCollection->get_objects({_id => $namemap->{ep}->{$samp->{envPackage}{name}}->{_id}})->[0];
+      }
+      
+      # create new ep for this sample if not created above abd set the project reference
+      unless (ref($ep_coll) && $ep_coll->parent && ($ep_coll->parent->{ID} == $samp_coll->ID)) {
+	$ep_coll = $self->add_collection($project, 'ep', $curator, $samp->{envPackage}{name}, $samp_coll);
+      }
+      
+      # delete existing ep metadata
+      my $ep_mde = $mddb->MetaDataEntry->get_objects({collection => $ep_coll});
+      map { $_->delete() } @$ep_mde;
+      
+      # set the id
+      $samp->{envPackage}{data}{mgrast_id} = { value => 'mge'.$ep_coll->ID };
+
+      # add the new metadata
+      my @ep_md = map { [ $_, $samp->{envPackage}{data}{$_}{value} ] } keys %{$samp->{envPackage}{data}};
+      push @ep_md, [ 'env_package', $samp->{envPackage}{type} ];
+      $self->add_entries($ep_coll, \@ep_md);
+
+    } else {
+      push @$err_msg, "sample has ep without type, skipped";
+    }
+    
+    # process libraries for sample
     my $has_lib = 0;
-    LIB: foreach my $lib (@{$samp->{libraries}}) {
-      # find job associated with library (use id or name for mapping)
-      my $lib_mg  = $map_by_id ? ($lib->{data}{metagenome_id} ? $lib->{data}{metagenome_id}{value} : undef) : $lib->{data}{metagenome_name}{value};
-      my $lib_job = ($lib_mg && exists($job_map->{$lib_mg})) ? $job_map->{$lib_mg} : undef;
+    foreach my $lib (@{$samp->{libraries}}) {
+      
+      # find job by metagenome id
+      my $lib_job;
+      if ($lib->{data}{metagenome_id} && $lib->{data}{metagenome_id}{value}) {
+	my $lib_mg = $lib->{data}{metagenome_id}{value};
+	$lib_mg = idresolve($lib_mg) ; 
+	$lib_job = ($lib_mg && exists($job_map_id->{$lib_mg})) ? $job_map_id->{$lib_mg} : undef;
+      }
+
+      # find job by metagenome name
+      unless (ref $lib_job) {
+	if ($lib->{data}{metagenome_name} && $lib->{data}{metagenome_name}{value}) {
+	  my $lib_mg = $lib->{data}{metagenome_name}{value};
+	  $lib_job = ($lib_mg && exists($job_map_name->{$lib_mg})) ? $job_map_name->{$lib_mg} : undef;
+	}
+      }
+
+      # throw error if the library is not mapped to a job
       unless ($lib_job && ref($lib_job)) {
 	push @$err_msg, "unable to map a metagenome to library ".$lib->{name};
-	next LIB;
+	next;
       }
 
+      # get the library
       my $lib_coll = undef;
+      
       # use existing library if ID given
       if ($lib->{id}) {
 	my $lib_ID = $lib->{id};
@@ -1182,37 +1542,54 @@ sub add_valid_metadata {
 	my $lib_proj = [];
 	if (ref($lib_coll)) {
 	  $lib_proj = $mddb->ProjectCollection->get_objects({project => $project, collection => $lib_coll});
+	} else {
+	  push @$err_msg, "library ".$lib->{id}." does not exist";
+	  next;
 	}
 	if (@$lib_proj == 0) {
-	  push @$err_msg, "library ".$lib->{id}." does not exist";
-	  next LIB;
+	  push @$err_msg, "library ".$lib->{id}." does not exist in this project";
+	  next;
 	} else {
 	  # valid library for this project
 	  $lib_coll->name($lib->{name});
 	}
       }
-      # else create new library
+      
+      # check if there is a library of this name
+      elsif (defined $namemap->{library}->{$lib->{name}}) {
+	$lib_coll = $mddb->MetaDataCollection->get_objects({_id => $namemap->{library}->{$lib->{name}}->{_id}})->[0];
+      }
+      # else create new library and set the reference to the project
       else {
 	$lib_coll = $self->add_collection($project, 'library', $curator, $lib->{name}, $samp_coll);
       }
-      # delete / replace library metadata
+      
+      # delete old library metadata
       my $lib_mde = $mddb->MetaDataEntry->get_objects({collection => $lib_coll});
       map { $_->delete() } @$lib_mde;
-      if (exists $lib->{data}{mgrast_id}) {
-	$lib->{data}{mgrast_id} = { value => 'mgl'.$lib_coll->ID };
-      }
+
+      # set id
+      $lib->{data}{mgrast_id} = { value => 'mgl'.$lib_coll->ID };
+
+      # add new metadata
       my @lib_md = map { [$_, $lib->{data}{$_}{value}] } keys %{$lib->{data}};
       $self->add_entries($lib_coll, \@lib_md);
-
-      ### add job to project
+      
+      # add job to project
       my $msg = $project->add_job($lib_job);
+
+      # check if there was an error
       if ($msg =~ /error/i) {
 	push @$err_msg, $msg;
-	next LIB;
-      } else {
-	## delete old if exists and not same as new
+	next;
+      }
+
+      # there was no error, add the references
+      else {
+	
+	# delete old if exists and not same as new and the delete_old option is passed
 	if ($delete_old && $lib_job->sample && ref($lib_job->sample) && ($lib_job->sample->ID != $samp_coll->ID)
-	                && $lib_job->library && ref($lib_job->library) && ($lib_job->library->ID != $lib_coll->ID)) {
+	    && $lib_job->library && ref($lib_job->library) && ($lib_job->library->ID != $lib_coll->ID)) {
 	  my $old_samp = $lib_job->sample;
 	  my $os_jobs  = $old_samp->jobs;
 	  if ((@$os_jobs == 1) && ($os_jobs->[0]->job_id == $lib_job->job_id)) {
@@ -1228,16 +1605,20 @@ sub add_valid_metadata {
 	    }
 	  }
 	}
-	## add new sample and library to job and project
+	
+	# add new sample and library to job
 	$lib_job->sample($samp_coll);
 	$lib_job->library($lib_coll);
+
+	# add sample and library to the project, in case it did not happen before
 	$project->add_collection( $lib_job->sample );
 	$project->add_collection( $lib_job->library );
+	
 	push @$added, $lib_job;
 	$has_lib = 1;
-
+	
 	# change job name if differs and using id mapping
-	if ($map_by_id && exists($lib->{data}{metagenome_name}) && ($lib->{data}{metagenome_name}{value} ne $lib_job->name)) {
+	if (exists($lib->{data}{metagenome_name}) && ($lib->{data}{metagenome_name}{value} ne $lib_job->name)) {
 	  $lib_job->name( $lib->{data}{metagenome_name}{value} );
 	}
       }
@@ -1248,6 +1629,7 @@ sub add_valid_metadata {
       $samp_coll->delete;
     }
   }
+  
   return ($project->id, $added, $err_msg);
 }
 

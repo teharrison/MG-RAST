@@ -68,8 +68,7 @@ purge:
 	rm -rf $(TARGET) bin/*.r 
 
 api-doc:
-	perl bin/api2html.pl -url http://api.metagenomics.anl.gov/1 -site_name "MG-RAST" -outfile site/CGI/Html/api.html
-	perl bin/api2html.pl -url http://kbase.us/services/communities/1 -site_name "Microbial Communities" -outfile site/CGI/Html/api.kbase.html
+	perl bin/api2html.pl -url http://api.mg-rast.org/1 -site_name "MG-RAST" -outfile site/CGI/Html/api.html
 
 ##
 # Targets to setup the expected directory structure for the

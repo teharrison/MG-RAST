@@ -7,13 +7,13 @@ $CGI::LIST_CONTEXT_WARN = 0;
 $CGI::Application::LIST_CONTEXT_WARN = 0;
 
 sub authenticate {
-  my ($key) = @_;
+  my ($key, $is_ssl) = @_;
 
   # check if we can connect to the user database
   use WebApplicationDBHandle;
   my ($master, $error) = WebApplicationDBHandle->new();
   if ($error) {
-    return (undef, "authentication database offline");
+    return (undef, "authentication database offline - ". $error);
   }
 
   # default values
@@ -24,7 +24,7 @@ sub authenticate {
   if ($key =~ /^mggo4711/) {
       $key =~ s/^mggo4711//;
       
-      unless ($ENV{'SCRIPT_URI'} =~ /^https/) {
+      if (! $is_ssl) {
           return (undef, "insecure protocol");
       }
 
@@ -33,10 +33,13 @@ sub authenticate {
       use Conf;
       my ($u,$p) = split(/\:/, decode_base64($key));
       my $us = $master->User->init( { login => $u } );
+      if (ref $us && ! $us->{active}) {
+	$us = undef;
+      }
       if (ref $us and crypt($p, $us->password) eq $us->password) {
         my $pref = $master->Preferences->get_objects( { name => 'WebServiceKeyTdate', user => $us } );
 	unless (scalar(@$pref)) {
-	  my $t = time + (60 * 60 * 24 * 7);
+	  my $t = time + (60 * 60 * 24 * 14);
 	  my $wkey = "";
 	  my $possible = 'abcdefghijkmnpqrstuvwxyz23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 	  while (length($wkey) < 25) {
@@ -88,6 +91,9 @@ sub authenticate {
 	    } else {
 	      $verbose.=', "preferences": '.$json->encode($response->{data}->{attributes}->{pref});
 	    }
+	  }
+	  if ($us->has_right(undef, 'edit', 'user', '*')) {
+	    $verbose.=', "admin": true';
 	  }
 	}
 	print $cgi->header(-type => 'application/json',
@@ -249,6 +255,9 @@ sub authenticate {
       $preference = $master->Preferences->get_objects( { name => 'WebServiceKeyTdate', user => $u } );
       if (scalar(@$preference) && $preference->[0]->value > time) {
 	$user = $preference->[0]->user;
+	if (! $user->{active}) {
+	  return (undef, "user deactivated");
+	}
 	return ($user);
       } else {
 	return (undef, "webkey expired");
@@ -257,7 +266,9 @@ sub authenticate {
 
       # return the user connected to the preference
       $user = $preference->[0]->user;
-      
+      if (! $user->{active}) {
+	return (undef, "user deactivated");
+      }
       return ($user);
     }
   } else {
@@ -265,6 +276,9 @@ sub authenticate {
     my $sessions = $master->UserSession->get_objects({ 'session_id' => $auth_value });
     if (scalar(@$sessions)) {
       $user = $sessions->[0]->user;
+      if (! $user->{active}) {
+	return (undef, "user deactivated");
+      }
       return ($user);
     }
 

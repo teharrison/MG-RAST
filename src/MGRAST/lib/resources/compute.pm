@@ -4,7 +4,6 @@ use strict;
 use warnings;
 no warnings('once');
 
-use MGRAST::Abundance;
 use List::MoreUtils qw(any uniq);
 use File::Temp qw(tempfile tempdir);
 
@@ -65,13 +64,13 @@ sub new {
 sub info {
     my ($self) = @_;
     my $content = { 'name' => $self->name,
-		            'url' => $self->cgi->url."/".$self->name,
+		            'url' => $self->url."/".$self->name,
 		            'description' => "Calculate various statistics for given input data.",
 		            'type' => 'object',
-		            'documentation' => $self->cgi->url.'/api.html#'.$self->name,
+		            'documentation' => $self->url.'/api.html#'.$self->name,
 		            'requests' => [
 		                { 'name'        => "info",
-				          'request'     => $self->cgi->url."/".$self->name,
+				          'request'     => $self->url."/".$self->name,
 				          'description' => "Returns description of parameters and attributes.",
 				          'method'      => "GET",
 				          'type'        => "synchronous",  
@@ -81,9 +80,9 @@ sub info {
 							                 'body'     => {} }
 						},
 						{ 'name'        => "alphadiversity",
-				          'request'     => $self->cgi->url."/".$self->name."/alphadiversity/{ID}",
+				          'request'     => $self->url."/".$self->name."/alphadiversity/{id}",
 				          'description' => "Calculate alpha diversity value for given ID and taxon level.",
-				          'example'     => [ $self->cgi->url."/".$self->name."/alphadiversity/mgm4447943.3?level=order",
+				          'example'     => [ $self->url."/".$self->name."/alphadiversity/mgm4447943.3?level=order",
              				                 "retrieve alpha diversity for order taxon" ],
 				          'method'      => "GET",
 				          'type'        => "synchronous or asynchronous",
@@ -95,9 +94,9 @@ sub info {
 							                 'body'     => {} }
 						},
 						{ 'name'        => "rarefaction",
-				          'request'     => $self->cgi->url."/".$self->name."/rarefaction/{ID}",
+				          'request'     => $self->url."/".$self->name."/rarefaction/{id}",
 				          'description' => "Calculate rarefaction x-y coordinates for given ID and taxon level.",
-				          'example'     => [ $self->cgi->url."/".$self->name."/rarefaction/mgm4447943.3?level=order",
+				          'example'     => [ $self->url."/".$self->name."/rarefaction/mgm4447943.3?level=order",
              				                 "retrieve rarefaction for order taxon" ],
 				          'method'      => "GET",
 				          'type'        => "synchronous or asynchronous",
@@ -106,14 +105,15 @@ sub info {
 				                                             "alpha" => ["boolean", "if true also return alphadiversity, default is false"],
 				                                             "seq_num" => ["int", "number of sequences in metagenome"],
 				                                             "ann_ver" => ["int", 'M5NR annotation version, default '.$self->{m5nr_default}],
+				                                             'retry'   => ['int', 'force rerun and set retry number, default is zero - no retry'],
 				                                             'asynchronous' => ['boolean', "if true return process id to query status resource for results, default is false"] },
 							                 'required' => { 'id' => ["string", "unique object identifier"] },
 							                 'body'     => {} }
 						},
 						{ 'name'        => "blast",
-				          'request'     => $self->cgi->url."/".$self->name."/blast/{ID}",
+				          'request'     => $self->url."/".$self->name."/blast/{id}",
 				          'description' => "Produce NCBI-BLAST sequence alinments for given md5sum and its hits.",
-				          'example'     => [ $self->cgi->url."/".$self->name."/blast/mgm4447943.3?md5=15bf1950bd9867099e72ea6516e3d602",
+				          'example'     => [ $self->url."/".$self->name."/blast/mgm4447943.3?md5=0001c2703270cc7aec519107b8215b11",
              				                 "retrieve sequence alignment for reads from mgm4447943.3 against m5nr feature" ],
 				          'method'      => "GET",
 				          'type'        => "synchronous or asynchronous",
@@ -127,9 +127,9 @@ sub info {
 							                 'body'     => {} }
 						},
 				        { 'name'        => "normalize",
-				          'request'     => $self->cgi->url."/".$self->name."/normalize",
+				          'request'     => $self->url."/".$self->name."/normalize",
 				          'description' => "Calculate normalized values for given input data.",
-				          'example'     => [ 'curl -X POST -d \'{'.$self->{example}.'}\' "'.$self->cgi->url."/".$self->name.'/normalize"',
+				          'example'     => [ 'curl -X POST -d \'{'.$self->{example}.'}\' "'.$self->url."/".$self->name.'/normalize"',
              				                 "retrieve normalized values for input abundances" ],
 				          'method'      => "POST",
 				          'type'        => "synchronous",
@@ -141,28 +141,10 @@ sub info {
           							                         "columns" => ['list', ['string', 'column id']],
           							                         "norm" => ['cv', [map {[$_, $_." normalization method"]} @{$self->{norm}}]] } }
 						},
-                        # { 'name'        => "significance",
-                        #                         'request'     => $self->cgi->url."/".$self->name."/significance",
-                        #                         'description' => "Calculate significance values for given input data.",
-                        #                         'example'     => [ 'curl -X POST -d \'{"test":"Kruskal-Wallis","groups":["whale","whale","cow","cow"],'.$self->{example}.'}\' "'.$self->cgi->url."/".$self->name.'/significance"',
-                        #                                            "retrieve significance values for input abundances and groups using the 'Kruskal-Wallis' significance test" ],
-                        #                         'method'      => "POST",
-                        #                         'type'        => "synchronous",
-                        #                         'attributes'  => $self->{attributes}{significance},
-                        #                         'parameters'  => { 'options'  => {},
-                        #                    'required' => {},
-                        #                    'body'     => { "data" => ['list', ['list', ['int', 'raw value']]],
-                        #                                                                "rows" => ['list', ['string', 'row id']],
-                        #                                                                "columns" => ['list', ['string', 'column id']],
-                        #                                                                "groups" =>  ['list', ['string', 'group name']],
-                        #                                                                "test" => ['cv', [map {[$_, $_." significance testing method"]} @{$self->{significance}}]],
-                        #                                                                "norm" => ['cv', [map {[$_, $_." normalization method"]} @{$self->{norm}}]],
-                        #                                                                "raw" => ["boolean", "option to use raw data (not normalize)"] } }
-                        # },
 						{ 'name'        => "distance",
-				          'request'     => $self->cgi->url."/".$self->name."/distance",
+				          'request'     => $self->url."/".$self->name."/distance",
 				          'description' => "Calculate a distance matrix for given input data.",
-				          'example'     => [ 'curl -X POST -d \'{"distance":"euclidean",'.$self->{example}.'}\' "'.$self->cgi->url."/".$self->name.'/distance"',
+				          'example'     => [ 'curl -X POST -d \'{"distance":"euclidean",'.$self->{example}.'}\' "'.$self->url."/".$self->name.'/distance"',
                  				             "retrieve distance matrix of normalized input abundances using 'euclidean' distance method" ],
 				          'method'      => "POST",
 				          'type'        => "synchronous",
@@ -177,9 +159,9 @@ sub info {
 							                                 "raw" => ["boolean", "option to use raw data (not normalize)"] } }
 						},
 						{ 'name'        => "heatmap",
-				          'request'     => $self->cgi->url."/".$self->name."/heatmap",
+				          'request'     => $self->url."/".$self->name."/heatmap",
 				          'description' => "Calculate a dendrogram for given input data.",
-				          'example'     => [ 'curl -X POST -d \'{"raw":0,"cluster":"mcquitty",'.$self->{example}.'}\' "'.$self->cgi->url."/".$self->name.'/heatmap"',
+				          'example'     => [ 'curl -X POST -d \'{"raw":0,"cluster":"mcquitty",'.$self->{example}.'}\' "'.$self->url."/".$self->name.'/heatmap"',
                				                 "retrieve dendrogram of normalized input abundances using 'mcquitty' cluster method" ],
 				          'method'      => "POST",
 				          'type'        => "synchronous",
@@ -195,9 +177,9 @@ sub info {
      							                             "raw" => ["boolean", "option to use raw data (not normalize)"] } }
 						},
 						{ 'name'        => "pcoa",
-				          'request'     => $self->cgi->url."/".$self->name."/pcoa",
+				          'request'     => $self->url."/".$self->name."/pcoa",
 				          'description' => "Calculate a PCoA for given input data.",
-				          'example'     => [ 'curl -X POST -d \'{"raw":1,"distance":"euclidean",'.$self->{example}.'}\' "'.$self->cgi->url."/".$self->name.'/pcoa"',
+				          'example'     => [ 'curl -X POST -d \'{"raw":1,"distance":"euclidean",'.$self->{example}.'}\' "'.$self->url."/".$self->name.'/pcoa"',
                  				             "retrieve PCO of raw input abundances using 'euclidean' distance method" ],
 				          'method'      => "POST",
 				          'type'        => "synchronous",
@@ -235,12 +217,13 @@ sub request {
 
 # the resource is called with an id parameter
 sub instance {
-    my ($self, $type, $mgid) = @_;
+    my ($self, $type, $tempid) = @_;
     
     # check id format
+    my $mgid = $self->idresolve($tempid);
     my (undef, $id) = $mgid =~ /^(mgm)?(\d+\.\d+)$/;
     if (! $id) {
-        $self->return_data({"ERROR" => "invalid id format: $mgid"}, 400);
+        $self->return_data({"ERROR" => "invalid id format: ".$tempid}, 400);
     }
     # get data
     my $master = $self->connect_to_datasource();
@@ -253,20 +236,24 @@ sub instance {
     unless ($job->public || ($self->user && ($self->user->has_right(undef, 'view', 'metagenome', $id) || $self->user->has_star_right('view', 'metagenome')))) {
         $self->return_data({"ERROR" => "insufficient permissions for metagenome mgm$id"}, 401);
     }
-    # test postgres access
-    my $testdb = MGRAST::Abundance->new(undef, undef, $Conf::mgrast_write_dbhost);
-    unless ($testdb) {
+    # test cassandra access
+    my $ctest = $self->cassandra_test("job");
+    unless ($ctest) {
         $self->return_data({"ERROR" => "unable to connect to metagenomics analysis database"}, 500);
     }
-    $testdb->DESTROY();
     
     my ($data, $error);
     
     # asynchronous call, fork the process and return the process id.
     if ($self->cgi->param('asynchronous')) {
+        my $level = $self->cgi->param('level') || 'species';
+        my $ver   = $self->cgi->param('ann_ver') || $self->{m5nr_default};
+        my $retry = int($self->cgi->param('retry')) || 0;
+        unless (($retry =~ /^\d+$/) && ($retry > 0)) {
+            $retry = 0;
+        }
         my $attr = {
-            type => "temp",
-            id   => $mgid,
+            type   => "temp",
             url_id => $self->url_id,
             owner  => $self->user ? 'mgu'.$self->user->_id : "anonymous",
             data_type => $type
@@ -274,9 +261,28 @@ sub instance {
         # already cashed in shock - say submitted in case its running
         my $nodes = $self->get_shock_query($attr, $self->mgrast_token);
         if ($nodes && (@$nodes > 0)) {
-            $self->return_data({"status" => "submitted", "id" => $nodes->[0]->{id}, "url" => $self->cgi->url."/status/".$nodes->[0]->{id}});
+            if ($retry) {
+                foreach my $n (@$nodes) {
+                    $self->delete_shock_node($n->{id}, $self->mgrast_token);
+                }
+            } else {
+                $self->return_data({"status" => "submitted", "id" => $nodes->[0]->{id}, "url" => $self->url."/status/".$nodes->[0]->{id}});
+            }
         }
         # need to create new node and fork
+        $attr->{progress} = {
+            completed => 'none',
+            queried   => 0,
+            found     => 0
+        };
+        $attr->{parameters} = {
+            id       => $mgid,
+            job_id   => $job->{job_id},
+            resource => "compute/".$type,
+            level    => $level,
+            version  => $ver,
+            retry    => $retry
+        };
         my $node = $self->set_shock_node("asynchronous", undef, $attr, $self->mgrast_token, undef, undef, "3D");
         my $pid = fork();
         # child - get data and dump it
@@ -286,7 +292,7 @@ sub instance {
             if ($type eq 'blast') {
                 ($data, $error) = $self->sequence_compute($id);
             } else {
-                ($data, $error) = $self->species_diversity_compute($type, $id);
+                ($data, $error) = $self->species_diversity_compute($type, $id, $node);
             }
             if ($error) {
                 $data->{STATUS} = $error;
@@ -296,7 +302,7 @@ sub instance {
         }
         # parent - end html session
         else {
-            $self->return_data({"status" => "submitted", "id" => $node->{id}, "url" => $self->cgi->url."/status/".$node->{id}});
+            $self->return_data({"status" => "submitted", "id" => $node->{id}, "url" => $self->url."/status/".$node->{id}});
         }
     }
     # synchronous call, prepare then return data
@@ -338,30 +344,23 @@ sub sequence_compute {
         return ({"ERROR" => "missing required md5"}, 404);
     }
     my $mgid = "mgm".$id;
-    my $mgdb = MGRAST::Abundance->new(undef, $ver);
-    unless ($mgdb) {
+    my $chdl = $self->cassandra_handle("job", $ver);
+    unless ($chdl) {
         return ({"ERROR" => "unable to connect to metagenomics analysis database"}, 500);
     }
     
     # get shock node for file
-    my $params = {type => 'metagenome', data_type => 'similarity', stage_name => 'filter.sims', id => $mgid};
+    my $params = {data_type => 'similarity', stage_name => 'filter.sims', id => $mgid};
     my $sim_node = $self->get_shock_query($params, $self->mgrast_token);
     unless ((@$sim_node > 0) && exists($sim_node->[0]{id})) {
         return ({"ERROR" => "unable to retrieve sequence file"}, 500);
     }
     my $node_id = $sim_node->[0]{id};
-    
-    # get seek / length
-    my $md5sum = $mgdb->dbh->selectcol_arrayref("SELECT _id FROM md5s WHERE md5=".$mgdb->dbh->quote($md5));
-    my $query  = "SELECT seek, length FROM job_md5s";
-    $query .= $mgdb->get_where_str([
-        'version = '.$mgdb->version,
-        'job = '.$job->{job_id},
-        'seek IS NOT NULL',
-        'length IS NOT NULL',
-        'md5 = '.$md5sum->[0]
-    ]);
-    my $info = $mgdb->dbh->selectrow_arrayref($query);
+    my $info = $chdl->get_md5_record($job->{job_id}, $md5);
+    $chdl->close();
+    unless ($info && (@$info > 0)) {
+        return ({"ERROR" => "metagenome mgm$id has no hits against the sequence with md5sum $md5"}, 500);
+    }
     
     # get sequences from record
     my $infasta = "";
@@ -386,22 +385,31 @@ sub sequence_compute {
     if ($error) {
         return ({"ERROR" => $error}, 500);
     }
+    unless ($md5fasta) {
+        return ({"ERROR" => "unable to retrieve sequence for $md5"}, 500);
+    }
+    
+    # make input seq file
+    my ($ifh, $ifile) = tempfile("md5XXXXXXX", DIR => $Conf::temp, SUFFIX => '.fasta');
+    print $ifh $infasta;
+    close($ifh);
+    
     # make md5 seq file
-    my ($tfh, $tfile) = tempfile("md5XXXXXXX", DIR => $Conf::temp, SUFFIX => '.fasta');
-    print $tfh $md5fasta;
-    close($tfh);
+    my ($mfh, $mfile) = tempfile("md5XXXXXXX", DIR => $Conf::temp, SUFFIX => '.fasta');
+    print $mfh $md5fasta;
+    close($mfh);
     
     # run blast
     my $cmd  = $rna ? "blastn" : "blastx";
     my $opts = "-evalue 0.".("0" x ($eval-1))."1 -dbsize ".$self->{dbsize}." -outfmt 0";
-    my $data = `echo "$infasta" | $cmd $opts -query - -subject $tfile 2> /dev/null`;
+    my $data = `$cmd $opts -query $ifile -subject $mfile 2> /dev/null`;
     
     return ({alignment => $data, md5 => $md5, reads => $reads}, undef);
 }
 
 # compute alpha diversity and/or rarefaction
 sub species_diversity_compute {
-    my ($self, $type, $id) = @_;
+    my ($self, $type, $id, $node) = @_;
     
     # get data
     my $master = $self->connect_to_datasource();
@@ -416,19 +424,23 @@ sub species_diversity_compute {
     my $ver   = $self->cgi->param('ann_ver') || $self->{m5nr_default};
     my $data  = {};
     
-    my $chdl = $self->cassandra_m5nr_handle("m5nr_v".$ver, $Conf::cassandra_m5nr);
-    my $mgdb = MGRAST::Abundance->new($chdl, $ver, $Conf::mgrast_write_dbhost); # write host for pipeline reads
-    unless ($mgdb) {
+    my $mgcass = $self->cassandra_abundance($ver);
+    unless ($mgcass) {
         return ({"ERROR" => "unable to connect to metagenomics analysis database"}, 500);
     }
     
-    my ($md5_num, $org_map, undef, undef) = $mgdb->all_job_abundances($job->{job_id}, [$level], 1, undef, undef);
+    if ($node) {
+        my $token = $self->mgrast_token;
+        $mgcass->set_shock($token);
+    }    
+    my ($md5_num, $org_map, undef, undef) = @{ $mgcass->all_annotation_abundances($job->{job_id}, [$level], 1, 0, 0, $node) };
     if ($md5_num == 0) {
         return ({"ERROR" => "no md5 hits available"}, 500);
     }
+    $mgcass->close();
     
     if ($type eq "alphadiversity") {
-        $data = $mgdb->get_alpha_diversity($org_map->{$level});
+        $data = $self->get_alpha_diversity($org_map->{$level});
     } elsif ($type eq "rarefaction") {
         my $snum = $self->cgi->param('seq_num') || 0;
         my $alpha = $self->cgi->param('alpha') ? 1 : 0;
@@ -436,17 +448,23 @@ sub species_diversity_compute {
             my $jstats = $job->stats();
             $snum = $jstats->{sequence_count_raw} || 1;
         }
-        my $rare = $mgdb->get_rarefaction_xy($org_map->{$level}, $snum);
+        my $rare = $self->get_rarefaction_xy($org_map->{$level}, $snum);
         if ($alpha) {
             $data->{rarefaction} = $rare;
-            $data->{alphadiversity} = $mgdb->get_alpha_diversity($org_map->{$level});
+            $data->{alphadiversity} = $self->get_alpha_diversity($org_map->{$level});
         } else {
             $data = $rare;
         }
     } else {
         return ({"ERROR" => "invalid compute type: $type"}, 400);
     }
-    $mgdb->DESTROY();
+    
+    # refresh node object
+    if ($node) {
+        $node = $self->get_shock_node($node->{id}, $self->mgrast_token);
+        $node->{attributes}{progress}{completed} = 'compute';
+        $self->update_shock_node($node->{id}, $node->{attributes}, $self->mgrast_token);
+    }
     
     return ($data, undef);
 }

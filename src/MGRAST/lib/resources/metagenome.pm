@@ -24,14 +24,15 @@ sub new {
     $self->{name} = "metagenome";
     $self->{rights} = \%rights;
     $self->{cv} = {
-        verbosity => {'minimal' => 1, 'mixs' => 1, 'metadata' => 1, 'stats' => 1, 'full' => 1, 'seqstats' => 1},
-        direction => {'asc' => 1, 'desc' => 1},
-        status    => {'both' => 1, 'public' => 1, 'private' => 1},
-        match     => {'any' => 1, 'all' => 1}
+		   verbosity => {'minimal' => 1, 'mixs' => 1, 'metadata' => 1, 'stats' => 1, 'full' => 1, 'seqstats' => 1, 'pipeline' => 1},
+		   direction => {'asc' => 1, 'desc' => 1},
+		   status    => {'both' => 1, 'public' => 1, 'private' => 1},
+		   match     => {'any' => 1, 'all' => 1},
+		   details   => {'function' => 1, 'taxonomy' => 1, 'ontology' => 1, 'gc_histogram' => 1, 'length_histogram' => 1, 'bp_profile' => 1, 'kmer' => 1, 'drisee' => 1, 'rarefaction' => 1, 'sequence_stats' => 1, 'sequence_breakdown' => 1, 'source_hits_distribution' => 1}
     };
     $self->{valid_types} = {
         "Amplicon"     => 1,
-        "AmpliconGene" => 1,
+        "Metabarcode" => 1,
         "MT"           => 1,
         "WGS"          => 1,
         "Unknown"      => 1
@@ -72,7 +73,7 @@ sub new {
         "PI_lastname"      => [ 'string', 'principal investigator\'s last name' ],
         "sequence_type"    => [ 'string', 'sequencing type' ],
         "seq_method"       => [ 'string', 'sequencing method' ],
-        "collection_date"  => [ 'string', 'date sample collected' ]
+        "collection_date"  => [ 'date', 'date sample collected' ]
     };
     # return object for query
     $self->{query}  = {
@@ -105,12 +106,12 @@ sub new {
 sub info {
     my ($self) = @_;
     my $content = { 'name'          => $self->name,
-                    'url'           => $self->cgi->url."/".$self->name,
+                    'url'           => $self->url."/".$self->name,
                     'description'   => "A metagenome is an analyzed set sequences from a sample of some environment",
                     'type'          => 'object',
-                    'documentation' => $self->cgi->url.'/api.html#'.$self->name,
+                    'documentation' => $self->url.'/api.html#'.$self->name,
                     'requests'      => [{ 'name'        => "info",
-                                          'request'     => $self->cgi->url."/".$self->name,
+                                          'request'     => $self->url."/".$self->name,
                                           'description' => "Returns description of parameters and attributes.",
                                           'method'      => "GET",
                                           'type'        => "synchronous",
@@ -120,9 +121,9 @@ sub info {
                                                              'body'     => {} }
                                         },
                                         { 'name'        => "query",
-                                          'request'     => $self->cgi->url."/".$self->name,
+                                          'request'     => $self->url."/".$self->name,
                                           'description' => "Returns a set of data matching the query criteria.",
-                                          'example'     => [ $self->cgi->url."/".$self->name."?limit=20&order=name",
+                                          'example'     => [ $self->url."/".$self->name."?limit=20&order=name",
                           				                     'retrieve the first 20 metagenomes ordered by name' ],
                                           'method'      => "GET",
                                           'type'        => "synchronous",
@@ -159,15 +160,17 @@ sub info {
                                                             'body'     => {} }
                                         },
                                         { 'name'        => "instance",
-                                          'request'     => $self->cgi->url."/".$self->name."/{ID}",
+                                          'request'     => $self->url."/".$self->name."/{id}",
                                           'description' => "Returns a single data object.",
-                                          'example'     => [ $self->cgi->url."/".$self->name."/mgm4447943.3?verbosity=metadata",
+                                          'example'     => [ $self->url."/".$self->name."/mgm4447943.3?verbosity=metadata",
                           				                     'retrieve all metadata for metagenome mgm4447943.3' ],
                                           'method'      => "GET",
                                           'type'        => "synchronous",
                                           'attributes'  => $self->{instance},
                                           'parameters'  => { 'options' => {
+                                                                 'nocache'   => ["boolean", "if true do not use cache"],
                                                                  'verbosity' => ['cv', [['minimal','returns only minimal information'],
+                                                                                        ['mixs','returns all GSC MIxS metadata'],
                                                                                         ['metadata','returns minimal with metadata'],
                                                                                         ['stats','returns minimal with statistics'],
                                                                                         ['full','returns all metadata and statistics']]]
@@ -181,6 +184,8 @@ sub info {
 # the resource is called with an id parameter
 sub instance {
     my ($self) = @_;
+
+    $self->json->utf8();
     
     # check verbosity
     my $verb = $self->cgi->param('verbosity') || 'minimal';
@@ -217,7 +222,8 @@ sub instance {
     }
     
     # check id format
-    my (undef, $id) = $rest->[0] =~ /^(mgm)?(\d+\.\d+)$/;
+    my $tempid = $self->idresolve($rest->[0]);
+    my (undef, $id) = $tempid =~ /^(mgm)?(\d+\.\d+)$/;
     if ((! $id) && scalar(@$rest)) {
         $self->return_data( {"ERROR" => "invalid id format: " . $rest->[0]}, 400 );
     }
@@ -236,6 +242,7 @@ sub instance {
             # check if the passed type is valid
             if ($self->{valid_types}->{$rest->[2]}) {
                 $job->sequence_type($rest->[2]);
+                $self->upsert_to_elasticsearch_metadata($job->metagenome_id);
             } else {
                 $self->return_data({"ERROR" => "Invalid sequence type passed (".$rest->[2].")."}, 404);
             }
@@ -255,7 +262,9 @@ sub instance {
     }
 
     # return cached if exists
-    $self->return_cached();
+    unless ($self->cgi->param('nocache')) {
+      $self->return_cached();
+    }
     
     # prepare data
     my $data = $self->prepare_data([$job], $verb);
@@ -267,6 +276,8 @@ sub instance {
 sub query {
     my ($self) = @_;
 
+    $self->json->utf8();
+    
     # get database
     my $master = $self->connect_to_datasource();
     
@@ -444,12 +455,12 @@ sub prepare_data {
     
     if (($verb eq 'metadata') || ($verb eq 'full')) {
         $mddb = MGRAST::Metadata->new();
-        $jobdata = $mddb->get_jobs_metadata_fast($mgids, 1);
+        $jobdata = $mddb->get_jobs_metadata_fast($mgids, 1, 1);
     }
 
     my $objects = [];
     foreach my $job (@$data) {
-        my $url = $self->cgi->url;
+        my $url = $self->url;
         # set object
         my $obj = {};
         $obj->{id} = "mgm".$job->{metagenome_id};
@@ -459,6 +470,7 @@ sub prepare_data {
         $obj->{status} = ($verb eq 'pipeline') ? 'pipeline' : ($job->{public} ? 'public' : 'private');
         $obj->{created} = $job->{created_on};
         $obj->{md5_checksum} = $job->{file_checksum_raw};
+        $obj->{owner}   = 'mgu'.$job->{owner};
         $obj->{version} = 1;
         $obj->{project} = undef;
         $obj->{sample}  = undef;
@@ -499,6 +511,13 @@ sub prepare_data {
 	    if (exists $jdata->{pipeline_id}) {
 	        $obj->{pipeline_id} = $jdata->{pipeline_id};
 	    }
+	    # add pipeline version if exists
+	    if (exists $jdata->{pipeline_version}) {
+	        $obj->{pipeline_version} = $jdata->{pipeline_version};
+	    } else {
+	        $obj->{pipeline_version} = '3.0';
+	    }
+	    
 	    # add pipeline info
 	    my $pparams = $self->pipeline_defaults;
 	    $pparams->{assembled} = (exists($jdata->{assembled}) && $jdata->{assembled}) ? 'yes' : 'no';
@@ -535,21 +554,24 @@ sub prepare_data {
             delete @{$pparams}{'filter_ln', 'filter_ln_mult', 'filter_ambig', 'max_ambig'};
         }
         $obj->{pipeline_parameters} = $pparams;
-        $obj->{pipeline_version} = '3.0';
         
         if (($verb eq 'mixs') || ($verb eq 'full')) {
             if (! $mddb) {
                 $mddb = MGRAST::Metadata->new();
             }
             my $mixs = $mddb->get_job_mixs($job);
-	    if ($verb eq 'full') {
-	      $obj->{mixs} = $mixs;
-	      my $proj_jobs = $job->primary_project->metagenomes(1);
-	      my ($min, $max, $avg, $stdv) = @{ $master->JobStatistics->stats_for_tag('alpha_diversity_shannon', $proj_jobs, 1) };
-	      $obj->{project_metagenomes} = $proj_jobs;
-	      $obj->{project_alpha_diversity} = { "min" => $min, "max" => $max, "avg" => $avg, "stdv" => $stdv };
+	        if ($verb eq 'full') {
+	            $obj->{mixs} = $mixs;
+	            $obj->{project_metagenomes} = undef;
+                $obj->{project_alpha_diversity} = undef;
+	            if ($obj->{project}) {
+	                my $proj_jobs = $job->primary_project->metagenomes(1);
+	                my ($min, $max, $avg, $stdv) = @{ $master->JobStatistics->stats_for_tag('alpha_diversity_shannon', $proj_jobs, 1) };
+	                $obj->{project_metagenomes} = $proj_jobs;
+	                $obj->{project_alpha_diversity} = { "min" => $min, "max" => $max, "avg" => $avg, "stdv" => $stdv };
+                }
             } else {
-	      map { $obj->{$_} = $mixs->{$_} } keys %$mixs;
+	            map { $obj->{$_} = $mixs->{$_} } keys %$mixs;
             }
         }
         if (($verb eq 'metadata') || ($verb eq 'full')) {
@@ -557,7 +579,40 @@ sub prepare_data {
             $obj->{mixs_compliant} = $mddb->is_job_compliant($job);
         }
         if (($verb eq 'stats') || ($verb eq 'full')) {
-            $obj->{statistics} = $self->metagenome_stats_from_shock('mgm'.$job->{metagenome_id}, $job->{sequence_type});
+	  $obj->{statistics} = $self->metagenome_stats_from_shock('mgm'.$job->{metagenome_id}, $job->{sequence_type});
+#{'function' => 1, 'taxonomy' => 1, 'ontology' => 1, 'gc_histogram' => 1, 'length_histogram' => 1, 'bp_profile' => 1, 'kmer' => 1, 'drisee' => 1, 'rarefaction' => 1, 'sequence_breakdown' => 1, 'source_hits_distribution' => 1 }
+	  my $detail = $self->cgi->param('detail');
+	  if ($detail && $self->{cv}->{details}->{$detail}) {
+	    my $data = {};
+	    if ($detail eq 'function') {
+	      $data = $obj->{statistics}->{function};
+	      unshift @$data, ['function','abundance'];
+	    } elsif ($detail eq 'taxonomy') {
+	      $data = $obj->{statistics}->{taxonomy};
+	    } elsif ($detail eq 'ontology') {
+	      $data = $obj->{statistics}->{ontology};
+	    } elsif ($detail eq 'gc_histogram') {
+	      $data = $obj->{statistics}->{gc_histogram};
+	    } elsif ($detail eq 'length_histogram') {
+	      $data = $obj->{statistics}->{length_histogram};
+	    } elsif ($detail eq 'bp_profile') {
+	      $data = $obj->{statistics}->{qc}->{bp_profile}->{counts};
+	    } elsif ($detail eq 'kmer') {
+	      $data = $obj->{statistics}->{qc}->{kmer};
+	    } elsif ($detail eq 'drisee') {
+	      $data = $obj->{statistics}->{qc}->{drisee}->{counts};
+	    } elsif ($detail eq 'rarefaction') {
+	      $data = $obj->{statistics}->{rarefaction};
+        } elsif ($detail eq 'sequence_stats') {
+          $data = $obj->{statistics}->{sequence_stats};
+	    } elsif ($detail eq 'sequence_breakdown') {
+	      $data = $obj->{statistics}->{sequence_breakdown};
+	    } elsif ($detail eq 'source_hits_distribution') {
+	      $data = $obj->{statistics}->{source};
+	    }
+	    push @$objects, $data;
+	    next;
+	  }
         }
         push @$objects, $obj;
     }

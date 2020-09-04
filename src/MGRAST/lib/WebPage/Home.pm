@@ -131,7 +131,7 @@ function forward_to_search (e) {
   $content .= "<div class='sidebar_subitem' style='font-size: 13px; padding: 1 0;'># of sequences<span class='sidebar_stat' style='font-size: 11px; padding-top:2px;' id='seqcount'></span></div>";
   $content .= "<div class='sidebar_subitem' style='font-size: 13px; padding: 1 0;'># of public metagenomes<span class='sidebar_stat' style='font-size: 11px; padding-top:2px;' id='publiccount'></span></div>";
   $content .= "</div>";
-  $content .= "<div style='float: left; width: 410px; line-height: 17px; margin: 10 0 0 10;'>The server primarily provides upload, quality control, automated annotation and analysis for prokaryotic metagenomic shotgun samples. MG-RAST was launched in 2007 and has over 12,000 registered users and <span id='jobcount2'></span> data sets. The current server version is ".$Conf::server_version.". We suggest users take a look at <a href='http://blog.metagenomics.anl.gov/mg-rast-for-the-impatient'>MG-RAST for the impatient</a>. Also available for download is the <a href='ftp://ftp.metagenomics.anl.gov/data/manual/mg-rast-manual.pdf' target=_blank>MG-RAST manual</a>.</div>"; 
+  $content .= "<div style='float: left; width: 410px; line-height: 17px; margin: 10 0 0 10;'>The server primarily provides upload, quality control, automated annotation and analysis for prokaryotic metagenomic shotgun samples. MG-RAST was launched in 2007 and has over 12,000 registered users and <span id='jobcount2'></span> data sets. The current server version is ".$Conf::server_version.". We suggest users take a look at <a href='http://blog.metagenomics.anl.gov/mg-rast-for-the-impatient'>MG-RAST for the impatient</a>. Also available for download is the <a href='ftp://ftp.mg-rast.org/data/manual/mg-rast-manual.pdf' target=_blank>MG-RAST manual</a>.</div>"; 
 
   $content .= "<div class='clear'></div>";
   $content .= qq~
@@ -160,10 +160,10 @@ google.setOnLoadCallback(initialize);
 <script>
 	Number.prototype.formatString = function(c, d, t) {
 	    var n = this, c = isNaN(c = Math.abs(c)) ? 0 : c, d = d == undefined ? "." : d, t = t == undefined ? "," : t, s = n < 0 ? "-" : "", i = parseInt(n = Math.abs(+n || 0).toFixed(c)) + "", j = (j = i.length) > 3 ? j % 3 : 0;
-	    return s + (j ? i.substr(0, j) + t : "") + i.substr(j).replace(/(\d{3})(?=\d)/g, "$1" + t) + (c ? d + Math.abs(n - i).toFixed(c).slice(2) : "");
+	    return s + (j ? i.substr(0, j) + t : "") + i.substr(j).replace(/(\d{3})(?=\d)/g, "\$1" + t) + (c ? d + Math.abs(n - i).toFixed(c).slice(2) : "");
 	};
     // server status info
-    jQuery.getJSON("http://api.metagenomics.anl.gov/server/MG-RAST", function (data) {
+    jQuery.getJSON("http://api.mg-rast.org/server/MG-RAST", function (data) {
 	// check if the server is down
 	if (data.status != "ok") {
 	    document.getElementById('info').innerHTML = data.info;
